@@ -1,7 +1,20 @@
+# API
 fastapi>=0.111.0
 uvicorn[standard]>=0.29.0
+pydantic>=2.0.0
+
+# Model & training
 scikit-learn>=1.4.0
 numpy>=1.26.0
 pandas>=2.2.0
 openpyxl>=3.1.0
-pydantic>=2.0.0
+
+# Pipeline — document parsing
+python-docx>=1.1.0
+pdfplumber>=0.11.0
+
+# Pipeline — de-identification
+openmed>=0.3.0
+
+# Pipeline — CLI output
+rich>=13.0.0

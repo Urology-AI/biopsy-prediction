@@ -1,0 +1,12 @@
+72
+Type: AR, MRI guided KOELIS
+Urine culture 5/26 NG
+PSA 4.47 (4/26)
+SHIM:24
+IPSS: 1
+BMI:23.86
+Risk Factor: MI in 2015 s/p stent
+EXACT SCAN 6/26
+24cc PRIMUS 4 Right PL PZ base and mid Abut yes NO EPE
+MRI 5/26     34cc
+PIRADS 4 Right PM PZ apex Abut yes No EPE

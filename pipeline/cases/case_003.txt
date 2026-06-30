@@ -1,0 +1,10 @@
+56
+Type: AR, MRI guided Koelis and sedation cystoscopy
+Urine culture 6/26: NG
+PSA 5.1 (5/26)     2.1(5/24)     1.5(5/23)
+SHIM: 24
+IPSS:17
+BMI:32.43
+EXACT SCAN 6/26   81cc PRIMUS 4 Left PL PZ mid Abut yes No EPE
+MRI 5/26
+73cc PIRADS 3 Left posterior PZ mid 1.7cm Abut present No EPE
