@@ -20,7 +20,10 @@ app = FastAPI(title="ePSA Biopsy Prediction", version="3.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "https://urology-ai.github.io",
+    ],
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
 )
