@@ -111,16 +111,18 @@ function InfoModal({ onClose }) {
           <section className="info-section">
             <h3>Performance</h3>
             <div className="info-table">
-              <div className="info-row"><span className="info-key">Training cohort</span><span className="info-val">N=120, Mount Sinai biopsy registry</span></div>
+              <div className="info-row"><span className="info-key">Training cohort</span><span className="info-val">N=120, Mount Sinai biopsy registry (2026)</span></div>
               <div className="info-row"><span className="info-key">GG≥2 prevalence</span><span className="info-val">29.2%</span></div>
               <div className="info-row"><span className="info-key">AUC (OOF)</span><span className="info-val">0.703 (5-fold CV × 100 repeats)</span></div>
               <div className="info-row"><span className="info-key">Decision threshold</span><span className="info-val">0.30 (OOF-optimal)</span></div>
               <div className="info-row"><span className="info-key">Sensitivity @ 0.30</span><span className="info-val">~94% — catches most GG≥2 cancers</span></div>
               <div className="info-row"><span className="info-key">High-grade missed</span><span className="info-val">0 GG3+ cancers missed at threshold 0.30</span></div>
+              <div className="info-row"><span className="info-key">Coefficients</span><span className="info-val">Frozen — will not be retrained</span></div>
             </div>
             <p className="info-note">
-              ⚠ Performance is out-of-fold on the training cohort. Independent prospective
-              validation (ePSA-VALIDATE) is underway. Results should be interpreted accordingly.
+              ⚠ Validation status: The 2026 biopsy registry cohort (N=120) is the <strong>training dataset</strong>.
+              OOF AUC is an honest within-sample estimate but is not independent validation.
+              The next prospective cohort (ePSA-VALIDATE) will serve as true independent validation.
             </p>
           </section>
 
