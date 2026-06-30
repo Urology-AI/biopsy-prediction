@@ -289,8 +289,26 @@ def _print_extraction_table(rows: list[dict]) -> None:
     console.print(tbl)
 
 
+def _auc(probs: list[float], labels: list[int]) -> float:
+    """Mann-Whitney AUC — no sklearn required."""
+    pos = [p for p, l in zip(probs, labels) if l == 1]
+    neg = [p for p, l in zip(probs, labels) if l == 0]
+    if not pos or not neg:
+        return float("nan")
+    concordant = sum(1 for p in pos for n in neg if p > n)
+    tied       = sum(1 for p in pos for n in neg if p == n)
+    return (concordant + 0.5 * tied) / (len(pos) * len(neg))
+
+
 def _print_summary(rows: list[dict]) -> None:
-    eligible = [r for r in rows if r.get("excluded") not in (True, "True") and r.get("correct") not in (None, "None", "")]
+    # Only rows with a known binary outcome
+    eligible = [
+        r for r in rows
+        if r.get("excluded") not in (True, "True")
+        and r.get("path_gg2_positive") in (True, "True", False, "False")
+        and r.get("predicted_prob") not in (None, "", "None")
+    ]
+
     tp = sum(1 for r in eligible if r["predicted_gg2_pos"] in (True,"True") and r["path_gg2_positive"] in (True,"True"))
     fp = sum(1 for r in eligible if r["predicted_gg2_pos"] in (True,"True") and r["path_gg2_positive"] in (False,"False"))
     tn = sum(1 for r in eligible if r["predicted_gg2_pos"] in (False,"False") and r["path_gg2_positive"] in (False,"False"))
@@ -299,26 +317,56 @@ def _print_summary(rows: list[dict]) -> None:
     reliable   = [r for r in eligible if r.get("model_reliable") in (True,"True")]
     unreliable = [r for r in eligible if r.get("model_reliable") in (False,"False")]
 
+    # AUC on all eligible rows with known outcome
+    probs  = [float(r["predicted_prob"]) for r in eligible]
+    labels = [1 if r["path_gg2_positive"] in (True,"True") else 0 for r in eligible]
+    auc    = _auc(probs, labels)
+
+    n_pos    = sum(labels)
+    n_neg    = len(labels) - n_pos
+    no_path  = sum(1 for r in rows
+                   if r.get("excluded") not in (True,"True")
+                   and r.get("path_gg2_positive") not in (True,"True",False,"False"))
+    no_pred  = sum(1 for r in rows
+                   if r.get("excluded") not in (True,"True")
+                   and r.get("predicted_prob") in (None,"","None"))
+
     console.print("\n[bold]── Validation Summary ──[/bold]")
-    console.print(f"  Total patients:          {len(rows)}")
-    console.print(f"  Excluded (post-proc):    {sum(1 for r in rows if r.get('excluded') in (True,'True'))}")
-    console.print(f"  Evaluated:               {len(eligible)}")
-    console.print(f"  Reliable (PI-RADS 4–5):  {len(reliable)}")
-    console.print(f"  Unreliable (PI-RADS ≤3): {len(unreliable)}")
+    console.print(f"  Total patients:           {len(rows)}")
+    console.print(f"  Excluded (post-proc):     {sum(1 for r in rows if r.get('excluded') in (True,'True'))}")
+    console.print(f"  Missing PI-RADS/PSA:      {no_pred}")
+    console.print(f"  Missing pathology result: {no_path}")
+    console.print(f"  Evaluable (known outcome + prediction): {len(eligible)}")
+    console.print(f"    GG≥2 positive: {n_pos}  |  GG<2 negative: {n_neg}")
+    console.print(f"  Reliable (PI-RADS 4–5):   {len(reliable)}")
+    console.print(f"  Unreliable (PI-RADS ≤3):  {len(unreliable)}")
+    console.print()
+    console.print(f"  [bold cyan]AUC (independent validation): {auc:.3f}[/bold cyan]")
     console.print()
     console.print(f"  TP={tp}  FP={fp}  TN={tn}  FN={fn}")
-    if tp + fp > 0:
-        console.print(f"  Precision:   {tp/(tp+fp):.2f}")
-    if tp + fn > 0:
-        console.print(f"  Sensitivity: {tp/(tp+fn):.2f}")
-    if tn + fp > 0:
-        console.print(f"  Specificity: {tn/(tn+fp):.2f}")
+    sens = tp/(tp+fn) if (tp+fn) else 0
+    spec = tn/(tn+fp) if (tn+fp) else 0
+    ppv  = tp/(tp+fp) if (tp+fp) else 0
+    npv  = tn/(tn+fn) if (tn+fn) else 0
+    console.print(f"  Sensitivity: {sens:.2f}  Specificity: {spec:.2f}")
+    console.print(f"  PPV:         {ppv:.2f}  NPV:         {npv:.2f}")
+
+    if fn > 0:
+        missed = [r for r in eligible
+                  if r["predicted_gg2_pos"] in (False,"False")
+                  and r["path_gg2_positive"] in (True,"True")]
+        console.print(f"\n  [red]False Negatives (GG≥2 missed):[/red]")
+        for r in missed:
+            gg = r.get("path_gg_max","?")
+            console.print(f"    {r['patient_id']}  PSA={r.get('psa','?')}  PI-RADS={r.get('pirads','?')}  "
+                          f"PSAD={r.get('psad','?')}  GG{gg}  P={float(r['predicted_prob']):.1%}")
+
     if len(reliable) > 0:
         rel_correct = sum(1 for r in reliable if r.get("correct") in (True,"True"))
-        console.print(f"  Reliable accuracy: {rel_correct}/{len(reliable)} ({100*rel_correct//len(reliable)}%)")
+        console.print(f"\n  Reliable (PI-RADS 4–5) accuracy: {rel_correct}/{len(reliable)} ({100*rel_correct//len(reliable)}%)")
     if len(unreliable) > 0:
         unrel_correct = sum(1 for r in unreliable if r.get("correct") in (True,"True"))
-        console.print(f"  Unreliable accuracy: {unrel_correct}/{len(unreliable)} ({100*unrel_correct//len(unreliable) if unreliable else 0}%)")
+        console.print(f"  Unreliable (PI-RADS ≤3) accuracy: {unrel_correct}/{len(unreliable)} ({100*unrel_correct//len(unreliable)}%)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

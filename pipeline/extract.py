@@ -309,25 +309,77 @@ def extract_fields(text: str, case_id: str = "", already_deidentified: bool = Fa
 # Pathology extraction
 # ---------------------------------------------------------------------------
 
+def _gleason_to_gg(a: int, b: int) -> int:
+    total = a + b
+    if total <= 6:                    return 1
+    if total == 7 and a == 3:         return 2
+    if total == 7 and a == 4:         return 3
+    if total == 8:                    return 4
+    return 5  # 9 or 10
+
+
 def extract_pathology(text: str) -> dict:
     t = text
-    benign = bool(re.search(r'benign\s+prostate\s+tissue', t, re.IGNORECASE))
-    gleason_pairs = re.findall(r'Gleason\s+\d+\s*\((\d)\+(\d)\)', t, re.IGNORECASE)
+
+    # ── Benign / negative patterns ────────────────────────────
+    benign = bool(re.search(
+        r'benign\s+prostate'
+        r'|no\s+(?:evidence\s+of\s+)?(?:carcinoma|malignancy|cancer|prostatic\s+adenocarcinoma)'
+        r'|negative\s+for\s+(?:malignancy|carcinoma|cancer)'
+        r'|prostatic\s+adenocarcinoma\s+not\s+identified'
+        r'|no\s+prostatic\s+adenocarcinoma'
+        r'|atypical\s+small\s+acinar\s+proliferation'   # ASAP — not cancer
+        r'|high.grade\s+prostatic\s+intraepithelial'    # HGPIN only — not cancer
+        , t, re.IGNORECASE
+    ))
 
     gg_scores = []
-    for a, b in gleason_pairs:
-        total = int(a) + int(b)
-        if total <= 6:       gg_scores.append(1)
-        elif total == 7 and int(a) == 3: gg_scores.append(2)
-        elif total == 7 and int(a) == 4: gg_scores.append(3)
-        elif total == 8:     gg_scores.append(4)
-        else:                gg_scores.append(5)
 
+    # ── 1. Explicit Grade Group label ─────────────────────────
+    # "Grade Group 2", "GG2", "GG 2", "grade group: 2"
+    for m in re.finditer(
+        r'(?:grade\s+group|GG)\s*[:\-]?\s*([1-5])',
+        t, re.IGNORECASE
+    ):
+        gg_scores.append(int(m.group(1)))
+
+    # ── 2. Gleason (total) (a+b) — original pattern ──────────
+    # "Gleason 7 (3+4)", "Gleason7 (3+4)", "Gleason score 7 (3+4)"
+    for m in re.finditer(
+        r'Gleason\s*(?:score\s*)?\d+\s*\((\d)\+(\d)\)',
+        t, re.IGNORECASE
+    ):
+        gg_scores.append(_gleason_to_gg(int(m.group(1)), int(m.group(2))))
+
+    # ── 3. Gleason (a+b) without total ───────────────────────
+    # "Gleason 3+4", "Gleason6(3+3)", "Gleason score: 3+4 = 7"
+    for m in re.finditer(
+        r'Gleason\s*(?:score\s*[:\-]?\s*)?(\d)\s*\+\s*(\d)(?!\s*\))',
+        t, re.IGNORECASE
+    ):
+        gg_scores.append(_gleason_to_gg(int(m.group(1)), int(m.group(2))))
+
+    # ── 4. Gleason = total only ───────────────────────────────
+    # "Gleason 6", "Gleason score 9" — less precise, only use if nothing else found
+    if not gg_scores:
+        for m in re.finditer(r'Gleason\s+(?:score\s*[:\-]?\s*)?([6-9]|10)\b', t, re.IGNORECASE):
+            total = int(m.group(1))
+            if total <= 6:   gg_scores.append(1)
+            elif total == 7: gg_scores.append(2)   # assume 3+4 (conservative)
+            elif total == 8: gg_scores.append(4)
+            else:            gg_scores.append(5)
+
+    # ── 5. Adenocarcinoma present but no grade ────────────────
+    has_cancer = bool(re.search(r'prostatic\s+adenocarcinoma|prostate\s+cancer', t, re.IGNORECASE))
+
+    # Deduplicate and compute max
+    gg_scores = sorted(set(gg_scores))
     gg_max = max(gg_scores) if gg_scores else (0 if benign else None)
+
     return {
-        "gg_max": gg_max,
-        "benign": benign and not gg_scores,
-        "gleason_scores": gleason_pairs,
-        "cribriform": bool(re.search(r'cribriform', t, re.IGNORECASE)),
-        "gg2_positive": (gg_max is not None and gg_max >= 2),
+        "gg_max":         gg_max,
+        "benign":         benign and not gg_scores,
+        "gleason_scores": gg_scores,
+        "cribriform":     bool(re.search(r'cribriform', t, re.IGNORECASE)),
+        "gg2_positive":   (gg_max is not None and gg_max >= 2),
     }
