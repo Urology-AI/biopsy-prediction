@@ -156,9 +156,13 @@ export default function App() {
   return (
     <div className="page">
       <header className="app-header">
-        <div>
+        <div className="header-title">
           <h1>ePSA Biopsy Prediction</h1>
-          <p className="subtitle">GG≥2 prostate cancer risk · Model v3 · AUC 0.703 · Threshold 0.30</p>
+          <div className="header-badge">
+            <span className="badge badge-purple">Model v3</span>
+            <span className="badge badge-green">AUC 0.703</span>
+            <span className="badge badge-gray">Threshold 0.30</span>
+          </div>
         </div>
         <div className="header-actions">
           {anyResults && (
