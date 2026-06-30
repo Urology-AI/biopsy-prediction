@@ -34,7 +34,7 @@ jobs:
         run: npm run build
         working-directory: frontend-react
         env:
-          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+          VITE_API_URL: https://biopsy-prediction.onrender.com
 
       - uses: actions/upload-pages-artifact@v3
         with:
