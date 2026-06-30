@@ -32,8 +32,14 @@ from extract import (
     extract_fields, extract_pathology, deidentify_note,
 )
 from model import predict
+from llm_extract import extract_with_llm, merge_llm_and_regex, llm_available
 
 console = Console()
+_USE_LLM = llm_available()
+if _USE_LLM:
+    console.print("[green]✓ Local LLM detected — will use for field extraction[/green]")
+else:
+    console.print("[yellow]⚠ No local LLM found — using regex only. Start LM Studio or Ollama to enable LLM extraction.[/yellow]")
 
 EXTRACTED_FIELDS = [
     "patient_id",
@@ -147,6 +153,35 @@ def stage_extract(docs_dir: str, out_csv: str) -> list[dict]:
                 "gg_max": None, "benign": None, "cribriform": False,
                 "gleason_scores": [], "gg2_positive": None,
             }
+
+            # LLM extraction — runs on full de-identified note, fills gaps left by regex
+            if _USE_LLM:
+                full_text = note_text + ("\n" + path_text if path_text else "")
+                llm = extract_with_llm(full_text)
+
+                # Fill clinical fields regex missed
+                if llm.get("psa") is not None and cf.psa is None:
+                    cf.psa = llm["psa"]
+                if llm.get("pirads") is not None and cf.pirads is None:
+                    cf.pirads = llm["pirads"]
+                if llm.get("prostate_volume_cc") is not None and cf.prostate_volume_cc is None:
+                    cf.prostate_volume_cc = llm["prostate_volume_cc"]
+                    if cf.psa and cf.prostate_volume_cc:
+                        cf.psad = round(cf.psa / cf.prostate_volume_cc, 4)
+                if llm.get("age") is not None and cf.age is None:
+                    cf.age = llm["age"]
+                if llm.get("excluded") and not cf.excluded:
+                    cf.excluded = True
+                    cf.exclusion_reason = llm.get("exclusion_reason", "LLM-flagged")
+
+                # Fill pathology fields regex missed
+                if llm.get("path_gg_max") is not None and path["gg_max"] is None:
+                    path["gg_max"]      = llm["path_gg_max"]
+                    path["gg2_positive"]= llm.get("path_gg2_positive", llm["path_gg_max"] >= 2)
+                if llm.get("path_benign") is not None and path["benign"] is None:
+                    path["benign"] = llm["path_benign"]
+                if llm.get("cribriform") and not path["cribriform"]:
+                    path["cribriform"] = llm["cribriform"]
 
             row = {
                 "patient_id":        patient_id,
