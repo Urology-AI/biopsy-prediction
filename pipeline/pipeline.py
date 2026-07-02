@@ -31,7 +31,7 @@ from extract import (
     read_file, split_patients, split_note_pathology,
     extract_fields, extract_pathology, deidentify_note,
 )
-from model import predict
+from model import predict, THRESHOLD
 from llm_extract import extract_with_llm, merge_llm_and_regex, llm_available
 
 console = Console()
@@ -260,6 +260,7 @@ def stage_predict(csv_path: str) -> list[dict]:
         pirads = _int(row.get("pirads"))
         psa    = _float(row.get("psa"))
         psad   = _float(row.get("psad"))
+        volume = _float(row.get("prostate_volume_cc"))
 
         if pirads is None or psa is None:
             row["predicted_prob"]    = None
@@ -269,12 +270,10 @@ def stage_predict(csv_path: str) -> list[dict]:
             console.print(f"  {row['patient_id']}: [yellow]Cannot predict — missing PSA or PI-RADS[/yellow]")
             continue
 
-        result = predict(pirads, psa, psad)
+        result = predict(pirads, psa, psad, volume)
         actual = _bool(row.get("path_gg2_positive"))
 
         row["predicted_prob"]    = round(result.prob, 4)
-        # v2 model threshold=0.30 (OOF-optimal for 28.9% prevalence; 91% sensitivity)
-        THRESHOLD = 0.30
         row["predicted_gg2_pos"] = result.prob >= THRESHOLD
         row["model_reliable"]    = result.reliable
         row["correct"]           = (result.prob >= THRESHOLD) == actual if actual is not None else None

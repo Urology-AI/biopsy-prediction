@@ -33,6 +33,7 @@ eligible = [
     and _f(r.get("psa"))    is not None
     and _i(r.get("pirads")) is not None
     and _f(r.get("psad"))   is not None
+    and _f(r.get("prostate_volume_cc")) is not None
     and _b(r.get("path_gg2_positive")) is not None
 ]
 
@@ -48,11 +49,13 @@ X, y = [], []
 for r in eligible:
     psa    = _f(r["psa"])
     psad   = _f(r["psad"])
+    volume = _f(r["prostate_volume_cc"])
     pirads = _i(r["pirads"])
     outcome= _b(r["path_gg2_positive"])
     X.append([
         math.log(max(psa, 0.01)),  # logPSA
         psad,                       # PSAD (continuous)
+        math.log(max(volume, 1.0)), # log prostate volume
         1 if pirads == 3 else 0,   # pirads_3
         1 if pirads == 4 else 0,   # pirads_4
         1 if pirads == 5 else 0,   # pirads_5
@@ -61,18 +64,28 @@ for r in eligible:
 
 X = np.array(X, dtype=float)
 y = np.array(y, dtype=int)
-feat_names = ["logPSA", "PSAD", "pirads_3", "pirads_4", "pirads_5"]
+feat_names = ["logPSA", "PSAD", "logVolume", "pirads_3", "pirads_4", "pirads_5"]
 
 # ── Cross-validated AUC ─────────────────────────────────────────────────────
-rskf = RepeatedStratifiedKFold(n_splits=5, n_repeats=100, random_state=42)
-oof  = np.zeros(len(y))
-for tr, te in rskf.split(X, y):
-    m = LogisticRegression(penalty="l2", C=1.0, solver="liblinear", max_iter=5000)
-    m.fit(X[tr], y[tr])
-    oof[te] = m.predict_proba(X[te])[:, 1]
+N_SPLITS, N_REPEATS = 5, 100
+rskf = RepeatedStratifiedKFold(n_splits=N_SPLITS, n_repeats=N_REPEATS, random_state=42)
+all_splits = list(rskf.split(X, y))
+repeat_aucs = []
+oof = np.zeros(len(y))
+for rep in range(N_REPEATS):
+    oof[:] = np.nan
+    for tr, te in all_splits[rep*N_SPLITS:(rep+1)*N_SPLITS]:
+        m = LogisticRegression(penalty="l2", C=1.0, solver="liblinear", max_iter=5000)
+        m.fit(X[tr], y[tr])
+        oof[te] = m.predict_proba(X[te])[:, 1]
+    repeat_aucs.append(roc_auc_score(y, oof))
 
-auc_oof = roc_auc_score(y, oof)
-print(f"  OOF AUC (5-fold × 100 repeats): {auc_oof:.4f}")
+repeat_aucs = np.array(repeat_aucs)
+auc_oof = float(repeat_aucs.mean())
+print(f"  OOF AUC (5-fold x {N_REPEATS} repeats, averaged): {auc_oof:.4f}  (sd {repeat_aucs.std():.4f})")
+
+# oof from the last repeat is kept for the threshold table below (illustrative only,
+# not the headline metric — that's the repeat-averaged auc_oof above)
 
 # ── Full-data fit (deploy weights) ──────────────────────────────────────────
 model = LogisticRegression(penalty="l2", C=1.0, solver="liblinear", max_iter=5000)
@@ -105,27 +118,32 @@ print(f"  Head-to-head: v1 vs v2 vs v3  (same {len(eligible)} patients)")
 print(f"{'='*60}")
 
 MODELS = {
-    "v1": dict(intercept=0.356742,  log_psa=-0.017489, psad=None,
+    "v1": dict(intercept=0.356742,  log_psa=-0.017489, psad=None, log_vol=None,
                pirads3=-0.061356, pirads4=0.967766, pirads5=1.255289, threshold=0.50),
-    "v2": dict(intercept=-1.526236, log_psa=0.260607,  psad=None,
+    "v2": dict(intercept=-1.526236, log_psa=0.260607,  psad=None, log_vol=None,
                pirads3=-1.200596, pirads4=0.424159, pirads5=0.792264, threshold=0.30),
     "v3": dict(intercept=intercept, log_psa=weights["logPSA"], psad=weights["PSAD"],
+               log_vol=weights["logVolume"],
                pirads3=weights["pirads_3"], pirads4=weights["pirads_4"],
                pirads5=weights["pirads_5"], threshold=0.30),
 }
 
-def prob(m, psa, psad_val, pirads):
+def prob(m, psa, psad_val, pirads, volume=None):
     lp = math.log(max(psa, 0.01))
     logit = (m["intercept"]
              + m["log_psa"] * lp
              + (m["psad"] * psad_val if m["psad"] is not None else 0)
+             + (m["log_vol"] * math.log(max(volume, 1.0)) if m.get("log_vol") is not None and volume is not None else 0)
              + m["pirads3"] * (1 if pirads==3 else 0)
              + m["pirads4"] * (1 if pirads==4 else 0)
              + m["pirads5"] * (1 if pirads==5 else 0))
     return 1 / (1 + math.exp(-logit))
 
-hdr = f"  {'Metric':<28}  {'v1':>8}  {'v2':>8}  {'v3+PSAD':>8}"
+hdr = f"  {'Metric':<28}  {'v1':>8}  {'v2':>8}  {'v3 (OOF)':>8}"
 print(hdr); print("  " + "─"*60)
+print(f"  (v1/v2 use frozen coefficients from prior cohorts — genuinely out-of-sample here.")
+print(f"   v3's AUC row below is the {N_REPEATS}-repeat OOF figure, not in-sample fit;")
+print(f"   the sens/spec/ppv/npv/confusion-matrix rows for v3 are still in-sample.)")
 
 for mname, m in MODELS.items():
     tp=fp=tn=fn=hg=0
@@ -133,10 +151,11 @@ for mname, m in MODELS.items():
     for r in eligible:
         psa_v    = _f(r["psa"])
         psad_v   = _f(r["psad"])
+        vol_v    = _f(r["prostate_volume_cc"])
         pirads_v = _i(r["pirads"])
         act      = _b(r["path_gg2_positive"])
         gg_max   = _i(r.get("path_gg_max"))
-        p = prob(m, psa_v, psad_v if psad_v else 0, pirads_v)
+        p = prob(m, psa_v, psad_v if psad_v else 0, pirads_v, vol_v)
         pred = p >= m["threshold"]
         probs_m.append(p); acts.append(act)
         if pred and act==1:     tp+=1
@@ -150,6 +169,8 @@ for mname, m in MODELS.items():
     conc  = sum(1 for p in pos_p for n in neg_p if p>n)
     tied  = sum(1 for p in pos_p for n in neg_p if p==n)
     auc_t = (conc+0.5*tied)/(len(pos_p)*len(neg_p))
+    if mname == "v3":
+        auc_t = auc_oof  # in-sample AUC is optimistically biased; report OOF for a fair comparison
     MODELS[mname]["_res"] = dict(tp=tp,fp=fp,tn=tn,fn=fn,hg=hg,
         sens=tp/(tp+fn) if (tp+fn) else 0,
         spec=tn/(tn+fp) if (tn+fp) else 0,
@@ -183,9 +204,10 @@ all_rows = list(csv.DictReader(open(CSV, encoding="utf-8")))
 p131 = next((r for r in all_rows if r["patient_id"]=="P0131"), None)
 if p131:
     psa_v = _f(p131.get("psa")); psad_v = _f(p131.get("psad")); pr = _i(p131.get("pirads"))
+    vol_v = _f(p131.get("prostate_volume_cc"))
     print(f"    PSA={psa_v}  PSAD={psad_v}  PI-RADS={pr}  GG={p131.get('path_gg_max')}")
     for mn, m in MODELS.items():
-        p = prob(m, psa_v or 0, psad_v or 0, pr or 4)
+        p = prob(m, psa_v or 0, psad_v or 0, pr or 4, vol_v)
         caught = "✓ CAUGHT" if p >= m["threshold"] else "✗ MISSED"
         print(f"    {mn}: P(GG≥2)={p:.1%}  threshold={m['threshold']:.0%}  → {caught}")
 
