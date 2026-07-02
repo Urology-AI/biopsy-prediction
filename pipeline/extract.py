@@ -163,12 +163,45 @@ class ClinicalFields:
 # De-identification
 # ---------------------------------------------------------------------------
 
+# Ages at or above this are still masked. HIPAA safe-harbor only requires
+# aggregating ages >=90, but we use a more conservative 80 cutoff since age
+# alone is more re-identifying in a small single-site cohort like this one.
+MAX_SAFE_AGE = 80
+
+
+def _restore_safe_ages(result) -> str:
+    """OpenMed masks every AGE entity like any other PII token. Age is a
+    clinically required field for the model (and an AUA-cited risk factor),
+    so restore ages below MAX_SAFE_AGE in place; entities at or above the
+    cutoff, or that don't parse as a clean number, stay masked as [age].
+
+    Note: this only recovers ages OpenMed tagged with canonical_label AGE
+    on their own (e.g. "62 year old"). It does NOT recover ages embedded in
+    a merged "Name /AGE/MRN" signature-line entity — OpenMed's smart merging
+    folds that whole span into a single ID_NUM/MRN token, and splitting it
+    pre-redaction (tested) broke the MRN's own redaction, so that case is
+    left masked rather than risk leaking an MRN. Fixing that needs a
+    dedicated, carefully-verified change, not a quick regex.
+    """
+    out = result.deidentified_text
+    for ent in result.pii_entities:
+        if ent.canonical_label != "AGE":
+            continue
+        digits = re.sub(r"\D", "", ent.text)
+        if not digits:
+            continue
+        age_val = int(digits)
+        if age_val < MAX_SAFE_AGE:
+            out = out.replace("[age]", str(age_val), 1)
+    return out
+
+
 def deidentify_note(text: str) -> str:
     if not OPENMED_AVAILABLE:
         return text
     try:
         result = deidentify(text, method="mask", confidence_threshold=0.4)
-        return result.deidentified_text
+        return _restore_safe_ages(result)
     except Exception:
         return text
 
@@ -213,13 +246,21 @@ def extract_fields(text: str, case_id: str = "", already_deidentified: bool = Fa
                 cf.exclusion_reason = f"Post-procedure type: {cf.case_type}"
                 return cf
 
-    # ── Age — first standalone 2-digit number near top of note ───────────────
+    # ── Age — first standalone 2-digit number near top of note, else "NN
+    #    year old" / "NN yo" / "age NN" anywhere in the note (catches ages
+    #    OpenMed's de-identification restored — see _restore_safe_ages —
+    #    that aren't at the top of the note) ───────────────────────────────
     age_m = re.search(
-        r'(?:^|\n)\s*(\d{2})\s*(?:\n|,|\s+(?:year|yo|y\.o|M\b|F\b|Type))',
+        r'(?:^|\n)\s*(?P<age>\d{2})\s*(?:\n|,|\s+(?:year|yo|y\.o|M\b|F\b|Type))',
         t, re.IGNORECASE | re.MULTILINE
+    ) or re.search(
+        r'\b(?P<age>\d{2})[\s-]?(?:years?[\s.-]?old|y\.?o\.?)\b|\bage[\s:]+(?P<age2>\d{2})\b',
+        t, re.IGNORECASE
     )
     if age_m:
-        cf.age = int(age_m.group(1))
+        age_str = age_m.group("age") or age_m.groupdict().get("age2")
+        if age_str:
+            cf.age = int(age_str)
 
     # ── PSA history ───────────────────────────────────────────────────────────
     psa_line_m = re.search(r'PSA\s*[:\s]\s*(.+)', t, re.IGNORECASE)
