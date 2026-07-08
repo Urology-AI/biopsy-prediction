@@ -22,7 +22,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
+        "http://localhost:3000",
         "https://urology-ai.github.io",
+        "https://epsa.millionstrongmen.com",
     ],
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
