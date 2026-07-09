@@ -105,6 +105,24 @@ def _best_model(base: str) -> str:
         return "default"
 
 
+# Max chars sent to the LLM. Callers append the pathology section after the
+# clinical note (see pipeline.py's full_text), so a naive text[:N] truncation
+# can silently drop the pathology report entirely on longer notes — which is
+# exactly the section path_gg_max/path_gg2_positive/cribriform depend on.
+# Keep a head budget for the note plus a reserved tail so the end of the
+# text (pathology) survives truncation intact.
+_MAX_CHARS   = 8000
+_TAIL_RESERVE = 2500
+
+
+def _truncate_for_llm(text: str) -> str:
+    text = text.strip()
+    if len(text) <= _MAX_CHARS:
+        return text
+    head_budget = _MAX_CHARS - _TAIL_RESERVE
+    return text[:head_budget] + "\n...[truncated]...\n" + text[-_TAIL_RESERVE:]
+
+
 def extract_with_llm(text: str, verbose: bool = False) -> dict:
     """
     Extract clinical fields from de-identified text using a local LLM.
@@ -118,8 +136,7 @@ def extract_with_llm(text: str, verbose: bool = False) -> dict:
     if verbose:
         print(f"    [LLM] Using {base}  model={model}")
 
-    # Truncate to ~3000 chars — enough for one patient note
-    note = text[:3000].strip()
+    note = _truncate_for_llm(text)
 
     payload = {
         "model": model,
@@ -160,6 +177,32 @@ def merge_llm_and_regex(llm: dict, regex: dict) -> dict:
         if val is not None and val != "":
             merged[key] = val  # LLM wins if it found something
     return merged
+
+
+def _values_disagree(a, b) -> bool:
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(float(a) - float(b)) > 1e-6
+    return a != b
+
+
+def find_disagreements(llm: dict, regex: dict) -> list[tuple[str, object, object]]:
+    """
+    Fields where both LLM and regex found a (non-null) value but they
+    disagree. Returned as (field, regex_value, llm_value) triples — an audit
+    trail for cases where merge_llm_and_regex() silently picked the LLM's
+    answer over regex's. Doesn't flag fields only one side found; that's
+    expected and not a disagreement.
+    """
+    out = []
+    for key, llm_val in llm.items():
+        if llm_val is None or llm_val == "":
+            continue
+        regex_val = regex.get(key)
+        if regex_val is None or regex_val == "":
+            continue
+        if _values_disagree(regex_val, llm_val):
+            out.append((key, regex_val, llm_val))
+    return out
 
 
 # ── Quick test ────────────────────────────────────────────────

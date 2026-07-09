@@ -32,7 +32,7 @@ from extract import (
     extract_fields, extract_pathology, deidentify_note,
 )
 from model import predict
-from llm_extract import extract_with_llm, merge_llm_and_regex, llm_available
+from llm_extract import extract_with_llm, merge_llm_and_regex, find_disagreements, llm_available
 
 console = Console()
 _USE_LLM = llm_available()
@@ -82,14 +82,7 @@ EXTRACTED_FIELDS = [
 # Stage 1 — Extract
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _deidentify_text(text: str) -> str:
-    """De-identify a block of text with OpenMed. Falls back to original if unavailable."""
-    try:
-        from openmed import deidentify as _deident
-        result = _deident(text, method="mask", confidence_threshold=0.4)
-        return result.deidentified_text
-    except Exception:
-        return text
+_deidentify_text = deidentify_note
 
 
 def stage_extract(docs_dir: str, out_csv: str) -> list[dict]:
@@ -154,32 +147,60 @@ def stage_extract(docs_dir: str, out_csv: str) -> list[dict]:
                 "gleason_scores": [], "gg2_positive": None,
             }
 
-            # LLM extraction — runs on full de-identified note, fills gaps left by regex
+            # LLM extraction — runs on full de-identified note. LLM takes
+            # priority over regex (it handles free-text variability much
+            # better), regex only fills fields the LLM returned null for.
+            # Disagreements (both sides found a value, but different ones)
+            # are logged rather than silently overwritten, so LLM errors are
+            # auditable instead of invisible.
             if _USE_LLM:
                 full_text = note_text + ("\n" + path_text if path_text else "")
                 llm = extract_with_llm(full_text)
 
-                # Fill clinical fields regex missed
-                if llm.get("psa") is not None and cf.psa is None:
-                    cf.psa = llm["psa"]
-                if llm.get("pirads") is not None and cf.pirads is None:
-                    cf.pirads = llm["pirads"]
-                if llm.get("prostate_volume_cc") is not None and cf.prostate_volume_cc is None:
-                    cf.prostate_volume_cc = llm["prostate_volume_cc"]
-                    if cf.psa and cf.prostate_volume_cc:
-                        cf.psad = round(cf.psa / cf.prostate_volume_cc, 4)
-                if llm.get("age") is not None and cf.age is None:
-                    cf.age = llm["age"]
+                regex_clinical = {
+                    "psa": cf.psa, "pirads": cf.pirads,
+                    "prostate_volume_cc": cf.prostate_volume_cc,
+                    "psad": cf.psad, "age": cf.age,
+                }
+                for field, disagree_regex, disagree_llm in find_disagreements(llm, regex_clinical):
+                    console.print(
+                        f"    {patient_id}: [magenta]LLM/regex disagree on {field}"
+                        f" — regex={disagree_regex} llm={disagree_llm} (using LLM)[/magenta]"
+                    )
+                    cf.extraction_notes.append(
+                        f"LLM/regex disagreement on {field}: regex={disagree_regex} llm={disagree_llm}"
+                    )
+                merged_clinical = merge_llm_and_regex(llm, regex_clinical)
+                cf.psa                = merged_clinical["psa"]
+                cf.pirads              = merged_clinical["pirads"]
+                cf.prostate_volume_cc  = merged_clinical["prostate_volume_cc"]
+                cf.age                 = merged_clinical["age"]
+                cf.psad                = merged_clinical["psad"]
+                if cf.psad is None and cf.psa and cf.prostate_volume_cc:
+                    cf.psad = round(cf.psa / cf.prostate_volume_cc, 4)
+
+                # excluded / cribriform are safety-relevant positive flags —
+                # OR them rather than letting either side override the
+                # other's "yes," so a case either extractor flags stays flagged.
                 if llm.get("excluded") and not cf.excluded:
                     cf.excluded = True
-                    cf.exclusion_reason = llm.get("exclusion_reason", "LLM-flagged")
+                    cf.exclusion_reason = cf.exclusion_reason or llm.get("exclusion_reason", "LLM-flagged")
 
-                # Fill pathology fields regex missed
-                if llm.get("path_gg_max") is not None and path["gg_max"] is None:
-                    path["gg_max"]      = llm["path_gg_max"]
-                    path["gg2_positive"]= llm.get("path_gg2_positive", llm["path_gg_max"] >= 2)
-                if llm.get("path_benign") is not None and path["benign"] is None:
-                    path["benign"] = llm["path_benign"]
+                regex_path = {"path_gg_max": path["gg_max"], "path_benign": path["benign"]}
+                llm_path = {"path_gg_max": llm.get("path_gg_max"), "path_benign": llm.get("path_benign")}
+                for field, disagree_regex, disagree_llm in find_disagreements(llm_path, regex_path):
+                    console.print(
+                        f"    {patient_id}: [magenta]LLM/regex disagree on {field}"
+                        f" — regex={disagree_regex} llm={disagree_llm} (using LLM)[/magenta]"
+                    )
+                    cf.extraction_notes.append(
+                        f"LLM/regex disagreement on {field}: regex={disagree_regex} llm={disagree_llm}"
+                    )
+                merged_path = merge_llm_and_regex(llm_path, regex_path)
+                path["gg_max"] = merged_path["path_gg_max"]
+                path["benign"] = merged_path["path_benign"]
+                if path["gg_max"] is not None:
+                    path["gg2_positive"] = llm.get("path_gg2_positive") if llm.get("path_gg_max") is not None else (path["gg_max"] >= 2)
                 if llm.get("cribriform") and not path["cribriform"]:
                     path["cribriform"] = llm["cribriform"]
 

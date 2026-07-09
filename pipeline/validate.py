@@ -65,7 +65,7 @@ def run_case(note_text: str, path_text: str, case_id: str) -> dict:
         return {k: None for k in CSV_HEADERS} | {"case_id": case_id, "notes": cf.exclusion_reason}
 
     path = extract_pathology(path_text)
-    result = predict(cf.pirads, cf.psa, cf.psad) if cf.pirads and cf.psa else None
+    result = predict(cf.pirads, cf.psa, cf.psad, cf.prostate_volume_cc) if cf.pirads and cf.psa else None
 
     predicted_prob = round(result.prob, 4) if result else None
     predicted_gg2_pos = (result.prob >= 0.5) if result else None
