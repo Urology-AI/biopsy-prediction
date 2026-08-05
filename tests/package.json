@@ -1,0 +1,12 @@
+{
+  "name": "biopsy-prediction-cross-impl-tests",
+  "private": true,
+  "type": "module",
+  "description": "Node-side harness for tests/test_cross_impl.py — invokes the published @urology-ai/epsa-engine port of this repo's model so the Python source of truth and the JS/TS consumers can be asserted against each other directly.",
+  "dependencies": {
+    "@urology-ai/epsa-engine": "^0.2.1"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
+}
