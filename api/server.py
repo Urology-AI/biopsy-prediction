@@ -26,6 +26,7 @@ app.add_middleware(
         "http://localhost:5298",
         "https://urology-ai.github.io",
         "https://epsa.millionstrongmen.com",
+        "https://www.urology.edu.eu.org",
     ],
     allow_methods=["POST", "GET"],
     allow_headers=["*"],
