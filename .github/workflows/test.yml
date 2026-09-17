@@ -1,0 +1,49 @@
+name: Model tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Python model tests
+        run: python3 model/test_model.py
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # @urology-ai/epsa-engine is a private GitHub Packages registry
+      # dependency — same EPSA_ENGINE_DEPLOY_KEY pattern used in
+      # e-psa-calculator and epsa-screening-tool's CI. Requires this repo to
+      # have that secret configured (it may not yet — add it under this
+      # repo's Settings > Secrets if the "Install cross-impl test deps" step
+      # below fails with a 403).
+      - name: Write .npmrc for private registry
+        run: |
+          echo "@urology-ai:registry=https://npm.pkg.github.com" > tests/.npmrc
+          echo "//npm.pkg.github.com/:_authToken=${EPSA_ENGINE_DEPLOY_KEY}" >> tests/.npmrc
+        env:
+          EPSA_ENGINE_DEPLOY_KEY: ${{ secrets.EPSA_ENGINE_DEPLOY_KEY }}
+
+      - name: Install cross-impl test deps
+        run: npm install
+        working-directory: tests
+
+      - name: Remove local .npmrc
+        if: always()
+        run: rm -f tests/.npmrc
+
+      - name: Run cross-implementation regression test (Python vs @urology-ai/epsa-engine)
+        run: python3 tests/test_cross_impl.py
