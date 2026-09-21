@@ -35,7 +35,7 @@ model/      — v3 prediction logic, training script, model comparison
 training/   — refit script (refit_part2_cancer_model.py)
 pipeline/   — 3-stage CLI: extract → OpenMed de-identify → predict
 api/        — FastAPI server (POST /predict)
-frontend-react/ — React playground (GitHub Pages)
+frontend-react/ — e-Biopsy: patient + clinician web app (GitHub Pages), scores in-browser via @urology-ai/epsa-engine
 ```
 
 ## Data & validation roadmap
