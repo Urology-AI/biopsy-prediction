@@ -1,392 +1,299 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useEffect } from 'react'
+import { predictBiopsyRisk, BIOPSY_THRESHOLD, ENGINE_VERSION } from '@urology-ai/epsa-engine'
 import './App.css'
 
-const API = import.meta.env.VITE_API_URL ?? ''
+// e-Biopsy — the ePSA companion for men deciding whether to have a prostate
+// biopsy. Scoring runs entirely in the browser through @urology-ai/epsa-engine
+// (the same predictBiopsyRisk ePSA uses), so every surface gives the same
+// answer for the same patient and nothing entered here leaves the device.
 
-const PIRADS_OPTIONS = [
-  { value: 1, label: '1 — Very low' },
-  { value: 2, label: '2 — Low' },
-  { value: 3, label: '3 — Intermediate' },
-  { value: 4, label: '4 — High' },
-  { value: 5, label: '5 — Very high' },
+const PIRADS = [
+  { value: 1, label: 'PI-RADS 1', plain: 'Very unlikely to be significant cancer' },
+  { value: 2, label: 'PI-RADS 2', plain: 'Unlikely to be significant cancer' },
+  { value: 3, label: 'PI-RADS 3', plain: 'Uncertain — could go either way' },
+  { value: 4, label: 'PI-RADS 4', plain: 'Significant cancer is likely' },
+  { value: 5, label: 'PI-RADS 5', plain: 'Significant cancer is very likely' },
 ]
 
-function newRow(id) {
-  return { id, psa: '', pirads: '', volume: '', result: null, error: null, loading: false }
+const TIER_TEXT = {
+  biopsy_not_indicated: {
+    headline: 'Your estimated risk is low',
+    body: 'Based on your PSA and MRI, a biopsy may not be needed right now. Many men in this range choose to keep checking their PSA instead. Talk this through with your urologist.',
+  },
+  monitoring_advised: {
+    headline: 'Your estimated risk is below average',
+    body: 'Your risk is on the lower side. Some men in this range have a biopsy and some choose close monitoring. Your urologist can help you decide what fits you.',
+  },
+  biopsy_discussion_advised: {
+    headline: 'A biopsy is worth discussing',
+    body: 'Your risk is high enough that most guidelines would suggest a biopsy. Ask your urologist what a biopsy involves and what the alternatives are.',
+  },
+  biopsy_recommended: {
+    headline: 'A biopsy is recommended',
+    body: 'Your PSA and MRI point to a meaningful chance of cancer that needs treatment. A biopsy is the way to find out for sure. Please follow up with your urologist.',
+  },
 }
 
-let nextId = 2
-
-function riskClass(prob) {
-  if (prob < 0.20) return 'risk-low'
-  if (prob < 0.30) return 'risk-below'
-  if (prob < 0.45) return 'risk-mid'
-  return 'risk-high'
+function score({ psa, pirads, volume }) {
+  const p = parseFloat(psa)
+  const r = parseInt(pirads, 10)
+  const v = parseFloat(volume)
+  if (!(p > 0) || !(r >= 1 && r <= 5)) return null
+  const hasVol = v > 0
+  return predictBiopsyRisk(r, p, hasVol ? v : null, hasVol ? p / v : null)
 }
 
-function riskLabel(prob) {
-  if (prob < 0.20) return 'Low'
-  if (prob < 0.30) return 'Below avg'
-  if (prob < 0.45) return 'Intermediate'
-  return 'Elevated'
-}
-
-async function runPredict(row) {
-  const psa = parseFloat(row.psa)
-  const pirads = parseInt(row.pirads)
-  if (!psa || psa <= 0 || !pirads) throw new Error('Missing PSA or PI-RADS')
-  const body = { psa, pirads }
-  const vol = parseFloat(row.volume)
-  if (vol > 0) body.prostate_volume = vol
-  const res = await fetch(`${API}/predict`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!res.ok) throw new Error(`Server error ${res.status}`)
-  return res.json()
-}
-
-function exportCSV(rows) {
-  const done = rows.filter(r => r.result)
-  if (!done.length) return
-  const header = 'Patient,PSA,PI-RADS,Volume,PSAD,P(GG>=2)%,Risk,Model'
-  const lines = done.map((r, i) => [
-    `P${String(i + 1).padStart(3, '0')}`,
-    r.psa, r.pirads, r.volume || '',
-    r.result.psad ?? '',
-    r.result.percent.toFixed(1),
-    riskLabel(r.result.prob),
-    r.result.model_version,
-  ].join(','))
-  const blob = new Blob([[header, ...lines].join('\n')], { type: 'text/csv' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = 'biopsy-predictions.csv'
-  a.click()
-}
-
-// ── Info Modal ───────────────────────────────────────────────
-function InfoModal({ onClose }) {
-  useEffect(() => {
-    const handler = e => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [onClose])
-
+// ── Header ───────────────────────────────────────────────────
+function Header({ view, setView }) {
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="About this model">
-        <div className="modal-header">
-          <h2>About This Model</h2>
-          <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
-        </div>
-        <div className="modal-body">
-
-          <section className="info-section">
-            <h3>What does this predict?</h3>
-            <p>
-              This tool estimates the probability of clinically significant prostate cancer —
-              defined as Grade Group ≥2 (Gleason ≥3+4) — on prostate biopsy. It is intended
-              to support shared decision-making between clinician and patient, not to replace it.
-            </p>
-          </section>
-
-          <section className="info-section">
-            <h3>How predictions are made</h3>
-            <p>A logistic regression model combines three inputs:</p>
-            <div className="info-table">
-              <div className="info-row"><span className="info-key">log(PSA)</span><span className="info-val">Serum PSA in ng/mL, log-transformed</span></div>
-              <div className="info-row"><span className="info-key">PI-RADS</span><span className="info-val">mpMRI score 1–5 (reference: 1–2)</span></div>
-              <div className="info-row"><span className="info-key">PSAD</span><span className="info-val">PSA density = PSA ÷ prostate volume (v3 only)</span></div>
-            </div>
-            <p className="info-formula">
-              logit(GG≥2) = −1.49 + 0.15·log(PSA) + 0.94·PSAD − 1.18·[PI-RADS 3] + 0.47·[PI-RADS 4] + 0.74·[PI-RADS 5]
-            </p>
-            <p>
-              When prostate volume is not entered, the v2 model (PSA + PI-RADS only, AUC 0.670) is used automatically as a fallback.
-            </p>
-          </section>
-
-          <section className="info-section">
-            <h3>Performance</h3>
-            <div className="info-table">
-              <div className="info-row"><span className="info-key">Training cohort</span><span className="info-val">N=120, Mount Sinai biopsy registry (2026)</span></div>
-              <div className="info-row"><span className="info-key">GG≥2 prevalence</span><span className="info-val">29.2%</span></div>
-              <div className="info-row"><span className="info-key">AUC (OOF)</span><span className="info-val">0.703 (5-fold CV × 100 repeats)</span></div>
-              <div className="info-row"><span className="info-key">Decision threshold</span><span className="info-val">0.30 (OOF-optimal)</span></div>
-              <div className="info-row"><span className="info-key">Sensitivity @ 0.30</span><span className="info-val">~94% — catches most GG≥2 cancers</span></div>
-              <div className="info-row"><span className="info-key">High-grade missed</span><span className="info-val">0 GG3+ cancers missed at threshold 0.30</span></div>
-              <div className="info-row"><span className="info-key">Coefficients</span><span className="info-val">Frozen — will not be retrained</span></div>
-            </div>
-            <p className="info-note">
-              ⚠ Validation status: The 2026 biopsy registry cohort (N=120) is the <strong>training dataset</strong>.
-              OOF AUC is an honest within-sample estimate but is not independent validation.
-              The next prospective cohort (ePSA-VALIDATE) will serve as true independent validation.
-            </p>
-          </section>
-
-          <section className="info-section">
-            <h3>Interpreting the result</h3>
-            <div className="info-table">
-              <div className="info-row risk-low"><span className="info-key">Low (&lt;20%)</span><span className="info-val">Below population baseline — biopsy deferral may be appropriate</span></div>
-              <div className="info-row risk-below"><span className="info-key">Below avg (20–30%)</span><span className="info-val">Approaching threshold — discuss with patient</span></div>
-              <div className="info-row risk-mid"><span className="info-key">Intermediate (30–45%)</span><span className="info-val">Above threshold — biopsy recommended</span></div>
-              <div className="info-row risk-high"><span className="info-key">Elevated (≥45%)</span><span className="info-val">High probability — biopsy strongly recommended</span></div>
-            </div>
-          </section>
-
-          <section className="info-section">
-            <h3>Sources</h3>
-            <ol className="info-sources">
-              <li>AUA/SUO Early Detection of Prostate Cancer Guidelines 2026. <em>J Urol.</em> 2026.</li>
-              <li>Tewari A, et al. "Factors predicting the need for biopsy in patients with PSA levels ≤4.0 ng/ml." <em>J Urol.</em> 1998;159(5):1529–34.</li>
-              <li>ePSA Model v3 — Mount Sinai Urology, retrained 2026-06-30.</li>
-            </ol>
-          </section>
-
-        </div>
+    <header className="eb-header">
+      <div className="eb-header-inner">
+        <button className="eb-brand" onClick={() => setView('welcome')}>
+          <span className="eb-logo" aria-hidden="true">e</span>
+          <span>
+            <span className="eb-brand-name">e-Biopsy</span>
+            <span className="eb-brand-sub">Mount Sinai · Tewari Lab</span>
+          </span>
+        </button>
+        <nav className="eb-tabs" aria-label="Mode">
+          <button className={view !== 'clinician' ? 'active' : ''} onClick={() => setView('welcome')}>Patient</button>
+          <button className={view === 'clinician' ? 'active' : ''} onClick={() => setView('clinician')}>Clinician</button>
+        </nav>
       </div>
-    </div>
+      <div className="eb-accent" />
+    </header>
   )
 }
 
-// ── Summary ──────────────────────────────────────────────────
-function Summary({ rows }) {
-  const done = rows.filter(r => r.result)
-  if (done.length === 0) return null
-  const probs = done.map(r => r.result.prob)
-  const avg = probs.reduce((a, b) => a + b, 0) / probs.length
-  const positive = done.filter(r => r.result.prob >= 0.30).length
-  const buckets = [
-    { label: 'Low (<20%)',           cls: 'risk-low',   count: done.filter(r => r.result.prob < 0.20).length },
-    { label: 'Below avg (20–30%)',   cls: 'risk-below', count: done.filter(r => r.result.prob >= 0.20 && r.result.prob < 0.30).length },
-    { label: 'Intermediate (30–45%)',cls: 'risk-mid',   count: done.filter(r => r.result.prob >= 0.30 && r.result.prob < 0.45).length },
-    { label: 'Elevated (≥45%)',      cls: 'risk-high',  count: done.filter(r => r.result.prob >= 0.45).length },
-  ]
+// ── Welcome ──────────────────────────────────────────────────
+function Welcome({ onStart }) {
   return (
-    <div className="summary">
-      <h2>Summary — {done.length} patient{done.length !== 1 ? 's' : ''}</h2>
-      <div className="summary-stats">
-        <div className="stat">
-          <span className="stat-val">{(avg * 100).toFixed(1)}%</span>
-          <span className="stat-key">Mean P(GG≥2)</span>
-        </div>
-        <div className="stat">
-          <span className="stat-val">{positive}/{done.length}</span>
-          <span className="stat-key">Above threshold (≥30%)</span>
-        </div>
+    <section className="eb-card eb-hero">
+      <div className="eb-hero-head">
+        <p className="eb-eyebrow">The next step after ePSA</p>
+        <h1>Should I have a prostate biopsy?</h1>
+        <p>If your PSA was raised and you've had an MRI, e-Biopsy estimates your chance of a prostate cancer that needs treatment. Use it to prepare for the conversation with your urologist. It doesn't make the decision for you.</p>
       </div>
-      <div className="buckets">
-        {buckets.map(b => (
-          <div key={b.label} className={`bucket ${b.cls}`}>
-            <span className="bucket-count">{b.count}</span>
-            <span className="bucket-label">{b.label}</span>
-          </div>
-        ))}
+      <div className="eb-hero-body">
+        <ul className="eb-need">
+          <li><strong>Your latest PSA</strong> (ng/mL), from your blood test</li>
+          <li><strong>Your PI-RADS score</strong> (1–5), from your MRI report</li>
+          <li><strong>Prostate volume</strong> (mL), also on the MRI report. This is optional but makes the estimate more accurate.</li>
+        </ul>
+        <button className="eb-btn eb-btn-primary" onClick={onStart}>Start</button>
+        <p className="eb-fine">Takes about a minute. Nothing you enter is stored or sent anywhere.</p>
       </div>
-    </div>
+    </section>
   )
 }
 
-// ── Patient row (mobile card view) ───────────────────────────
-function PatientCard({ row, index, onUpdate, onRun, onRemove }) {
-  const update = patch => onUpdate(row.id, { ...patch, result: null, error: null })
-  return (
-    <div className={`patient-card ${row.result ? riskClass(row.result.prob) + '-card' : ''}`}>
-      <div className="card-top">
-        <span className="card-num">Patient {index + 1}</span>
-        <div className="card-actions">
-          <button className="btn-run" onClick={() => onRun(row.id)} disabled={row.loading || !row.psa || !row.pirads}>▶</button>
-          <button className="btn-remove" onClick={() => onRemove(row.id)} disabled={false}>×</button>
-        </div>
-      </div>
-      <div className="card-fields">
-        <div className="card-field">
-          <label>PSA (ng/mL)</label>
-          <input type="number" min="0.1" step="0.1" placeholder="e.g. 5.2" value={row.psa} onChange={e => update({ psa: e.target.value })} />
-        </div>
-        <div className="card-field">
-          <label>PI-RADS</label>
-          <select value={row.pirads} onChange={e => update({ pirads: e.target.value })}>
-            <option value="">—</option>
-            {PIRADS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.value}</option>)}
-          </select>
-        </div>
-        <div className="card-field">
-          <label>Volume (mL)</label>
-          <input type="number" min="1" step="1" placeholder="optional" value={row.volume} onChange={e => update({ volume: e.target.value })} />
-        </div>
-      </div>
-      {row.loading && <div className="card-result"><span className="spinner" /></div>}
-      {row.error && <div className="card-result"><span className="err-cell" title={row.error}>!</span> <span className="err-text">{row.error}</span></div>}
-      {row.result && (
-        <div className="card-result">
-          <span className={`pct-badge ${riskClass(row.result.prob)}`}>{row.result.percent.toFixed(1)}%</span>
-          <span className={`risk-tag ${riskClass(row.result.prob)}`}>{riskLabel(row.result.prob)}</span>
-          {row.result.psad != null && <span className="card-detail">PSAD {row.result.psad.toFixed(3)}</span>}
-          <span className="card-detail">{row.result.guideline_rate} guideline</span>
-        </div>
-      )}
-    </div>
-  )
-}
+// ── Patient questionnaire ────────────────────────────────────
+function Questionnaire({ values, setValues, onDone, onBack }) {
+  const [step, setStep] = useState(0)
+  const set = (k) => (e) => setValues({ ...values, [k]: e.target.value })
+  const psaOk = parseFloat(values.psa) > 0
+  const volOk = values.volume === '' || parseFloat(values.volume) > 0
 
-// ── Main App ─────────────────────────────────────────────────
-export default function App() {
-  const [rows, setRows] = useState([newRow(1)])
-  const [showInfo, setShowInfo] = useState(false)
-  const [theme, setTheme] = useState(() => {
-    const saved = localStorage.getItem('theme')
-    if (saved) return saved
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-  })
-
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme)
-    localStorage.setItem('theme', theme)
-  }, [theme])
-
-  const update = useCallback((id, patch) => {
-    setRows(rs => rs.map(r => r.id === id ? { ...r, ...patch } : r))
-  }, [])
-
-  function addRow() { setRows(rs => [...rs, newRow(nextId++)]) }
-  function removeRow(id) { setRows(rs => rs.length > 1 ? rs.filter(r => r.id !== id) : rs) }
-  function clearAll() { setRows([newRow(nextId++)]) }
-
-  async function runOne(id) {
-    const row = rows.find(r => r.id === id)
-    update(id, { loading: true, error: null, result: null })
-    try {
-      update(id, { result: await runPredict(row), loading: false })
-    } catch (e) {
-      update(id, { error: e.message, loading: false })
-    }
-  }
-
-  async function runAll() {
-    const eligible = rows.filter(r => r.psa && r.pirads)
-    eligible.forEach(r => update(r.id, { loading: true, error: null, result: null }))
-    await Promise.all(eligible.map(async r => {
-      try { update(r.id, { result: await runPredict(r), loading: false }) }
-      catch (e) { update(r.id, { error: e.message, loading: false }) }
-    }))
-  }
-
-  const anyLoading = rows.some(r => r.loading)
-  const anyResults = rows.some(r => r.result)
-
-  return (
-    <>
-      <div className="page">
-        <header className="app-header">
-          <div className="header-title">
-            <h1>ePSA Biopsy Prediction</h1>
-            <div className="header-badges">
-              <span className="badge badge-purple">Model v3</span>
-              <span className="badge badge-green">AUC 0.703</span>
-              <span className="badge badge-gray">Threshold 0.30</span>
-            </div>
-          </div>
-          <div className="header-actions">
-            <button className="btn-icon" onClick={() => setShowInfo(true)} aria-label="About this model" title="About this model">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-              </svg>
+  const steps = [
+    {
+      title: 'What was your most recent PSA?',
+      help: 'This is on your blood test results, in ng/mL. For example: 5.4',
+      ok: psaOk,
+      field: (
+        <label className="eb-field">
+          <span>PSA (ng/mL)</span>
+          <input type="number" inputMode="decimal" min="0.1" step="0.1" autoFocus value={values.psa} onChange={set('psa')} placeholder="e.g. 5.4" />
+        </label>
+      ),
+    },
+    {
+      title: 'What was your MRI PI-RADS score?',
+      help: 'Your MRI report gives a PI-RADS score from 1 to 5. If there were several spots, use the highest one.',
+      ok: !!values.pirads,
+      field: (
+        <div className="eb-choices" role="radiogroup" aria-label="PI-RADS score">
+          {PIRADS.map((o) => (
+            <button key={o.value} role="radio" aria-checked={String(values.pirads) === String(o.value)}
+              className={`eb-choice ${String(values.pirads) === String(o.value) ? 'selected' : ''}`}
+              onClick={() => setValues({ ...values, pirads: String(o.value) })}>
+              <strong>{o.label}</strong><span>{o.plain}</span>
             </button>
-            <button className="btn-icon" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')} aria-label="Toggle theme" title="Toggle light/dark mode">
-              {theme === 'dark'
-                ? <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-                : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-              }
-            </button>
-            {anyResults && <button className="btn-secondary" onClick={() => exportCSV(rows)}>Export CSV</button>}
-            <button className="btn-secondary" onClick={clearAll}>Clear</button>
-            <button className="btn-primary" onClick={runAll} disabled={anyLoading}>
-              {anyLoading ? 'Running…' : `Run all (${rows.length})`}
-            </button>
-          </div>
-        </header>
-
-        {/* Desktop table */}
-        <div className="table-wrap desktop-only">
-          <table className="patient-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>PSA (ng/mL)</th>
-                <th>PI-RADS</th>
-                <th>Volume (mL)</th>
-                <th>PSAD</th>
-                <th>P(GG≥2)</th>
-                <th>Risk</th>
-                <th>Guideline rate</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, i) => (
-                <tr key={row.id} className={row.result ? riskClass(row.result.prob) + '-row' : ''}>
-                  <td className="row-num">{i + 1}</td>
-                  <td>
-                    <input type="number" min="0.1" step="0.1" placeholder="e.g. 5.2" value={row.psa}
-                      onChange={e => update(row.id, { psa: e.target.value, result: null, error: null })} />
-                  </td>
-                  <td>
-                    <select value={row.pirads} onChange={e => update(row.id, { pirads: e.target.value, result: null, error: null })}>
-                      <option value="">—</option>
-                      {PIRADS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.value}</option>)}
-                    </select>
-                  </td>
-                  <td>
-                    <input type="number" min="1" step="1" placeholder="optional" value={row.volume}
-                      onChange={e => update(row.id, { volume: e.target.value, result: null, error: null })} />
-                  </td>
-                  <td className="result-cell">
-                    {row.result?.psad != null ? row.result.psad.toFixed(3) : <span className="muted">—</span>}
-                  </td>
-                  <td className="result-cell">
-                    {row.loading && <span className="spinner" />}
-                    {row.result && <span className={`pct-badge ${riskClass(row.result.prob)}`}>{row.result.percent.toFixed(1)}%</span>}
-                    {row.error && <span className="err-cell" title={row.error}>!</span>}
-                    {!row.result && !row.loading && !row.error && <span className="muted">—</span>}
-                  </td>
-                  <td className="result-cell">
-                    {row.result ? <span className={`risk-tag ${riskClass(row.result.prob)}`}>{riskLabel(row.result.prob)}</span> : <span className="muted">—</span>}
-                  </td>
-                  <td className="result-cell">
-                    {row.result ? <span className="guideline">{row.result.guideline_rate}</span> : <span className="muted">—</span>}
-                  </td>
-                  <td className="actions-cell">
-                    <button className="btn-run" onClick={() => runOne(row.id)} disabled={row.loading || !row.psa || !row.pirads}>▶</button>
-                    <button className="btn-remove" onClick={() => removeRow(row.id)} disabled={rows.length === 1}>×</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <button className="btn-add" onClick={addRow}>+ Add patient</button>
-        </div>
-
-        {/* Mobile cards */}
-        <div className="mobile-only">
-          {rows.map((row, i) => (
-            <PatientCard key={row.id} row={row} index={i}
-              onUpdate={update} onRun={runOne} onRemove={removeRow} />
           ))}
-          <button className="btn-add-mobile" onClick={addRow}>+ Add patient</button>
         </div>
+      ),
+    },
+    {
+      title: 'What is your prostate volume?',
+      help: 'Usually listed on the MRI report as "prostate volume" or "gland volume", in mL or cc (they are the same). Leave blank if you don\'t know it.',
+      ok: volOk,
+      field: (
+        <label className="eb-field">
+          <span>Prostate volume (mL) — optional</span>
+          <input type="number" inputMode="decimal" min="1" step="1" autoFocus value={values.volume} onChange={set('volume')} placeholder="e.g. 45" />
+        </label>
+      ),
+    },
+  ]
+  const s = steps[step]
+  const last = step === steps.length - 1
 
-        <Summary rows={rows} />
-
-        <p className="disclaimer">
-          For clinical decision support only · Not a replacement for physician judgment ·{' '}
-          <button className="link-btn" onClick={() => setShowInfo(true)}>About this model</button>
-        </p>
+  return (
+    <section className="eb-card eb-step">
+      <div className="eb-progress" aria-label={`Step ${step + 1} of ${steps.length}`}>
+        {steps.map((_, i) => <span key={i} className={i <= step ? 'on' : ''} />)}
       </div>
+      <h2>{s.title}</h2>
+      <p className="eb-help">{s.help}</p>
+      {s.field}
+      <div className="eb-nav">
+        <button className="eb-btn" onClick={() => (step ? setStep(step - 1) : onBack())}>Back</button>
+        <button className="eb-btn eb-btn-primary" disabled={!s.ok} onClick={() => (last ? onDone() : setStep(step + 1))}>
+          {last ? 'See my result' : 'Next'}
+        </button>
+      </div>
+    </section>
+  )
+}
 
-      {showInfo && <InfoModal onClose={() => setShowInfo(false)} />}
-    </>
+// ── Patient result ───────────────────────────────────────────
+function Result({ values, onRestart }) {
+  const [detail, setDetail] = useState(false)
+  const r = score(values)
+  if (!r) return null
+  const text = TIER_TEXT[r.tier.key]
+  const outOf100 = Math.round(r.percent)
+
+  return (
+    <section className={`eb-card eb-result tier-${r.tier.key}`}>
+      <p className="eb-eyebrow">Your e-Biopsy result</p>
+      <h2>{text.headline}</h2>
+      <div className="eb-meter" role="img" aria-label={`About ${outOf100} in 100`}>
+        <div className="eb-meter-fill" style={{ width: `${Math.min(r.percent, 100)}%` }} />
+        <div className="eb-meter-mark" style={{ left: `${BIOPSY_THRESHOLD * 100}%` }} title="Biopsy threshold" />
+      </div>
+      <p className="eb-big">About <strong>{outOf100} in 100</strong> men with results like yours have a prostate cancer that needs treatment (Grade Group 2 or higher).</p>
+      <p>{text.body}</p>
+      {!r.reliable && (
+        <p className="eb-note">With a PI-RADS score of {values.pirads}, this estimate is less certain. Your urologist may also look at other tests.</p>
+      )}
+
+      <button className="eb-link" onClick={() => setDetail(!detail)} aria-expanded={detail}>
+        {detail ? 'Hide clinical detail' : 'Show clinical detail (for your doctor)'}
+      </button>
+      {detail && (
+        <dl className="eb-detail">
+          <dt>P(GG≥2)</dt><dd>{r.percent.toFixed(1)}%</dd>
+          <dt>Tier</dt><dd>{r.tier.label}</dd>
+          <dt>Interpretation</dt><dd>{r.interpretation}</dd>
+          <dt>PI-RADS {values.pirads} population rate</dt><dd>{r.guidelineRate} (AUA/SUO 2026)</dd>
+          {r.psad != null && (<><dt>PSA density</dt><dd>{r.psad.toFixed(3)} — {r.psadTier}</dd></>)}
+          <dt>Model</dt><dd>{r.modelVersion} · threshold {BIOPSY_THRESHOLD} · engine {ENGINE_VERSION}</dd>
+        </dl>
+      )}
+
+      <div className="eb-nav">
+        <button className="eb-btn" onClick={() => window.print()}>Print for my visit</button>
+        <button className="eb-btn eb-btn-primary" onClick={onRestart}>Start over</button>
+      </div>
+    </section>
+  )
+}
+
+// ── Clinician view (multi-patient) ───────────────────────────
+let nextId = 1
+const newRow = () => ({ id: nextId++, psa: '', pirads: '', volume: '' })
+
+function Clinician() {
+  const [rows, setRows] = useState(() => [newRow()])
+  const edit = (id, k, v) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, [k]: v } : r)))
+  const scored = rows.map((r) => ({ ...r, result: score(r) }))
+
+  function exportCsv() {
+    const done = scored.filter((r) => r.result)
+    if (!done.length) return
+    const header = 'Patient,PSA,PI-RADS,Volume (mL),PSAD,P(GG>=2) %,Tier,Model'
+    const lines = done.map((r, i) => [
+      `P${String(i + 1).padStart(3, '0')}`, r.psa, r.pirads, r.volume || '',
+      r.result.psad != null ? r.result.psad.toFixed(3) : '',
+      r.result.percent.toFixed(1), r.result.tier.label, `"${r.result.modelVersion}"`,
+    ].join(','))
+    const url = URL.createObjectURL(new Blob([[header, ...lines].join('\n')], { type: 'text/csv' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'e-biopsy-predictions.csv'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  return (
+    <section className="eb-card eb-clin">
+      <h2>Clinician view</h2>
+      <p className="eb-help">GG≥2 risk for one or more patients. Results update as you type. Nothing is stored; the CSV is generated in your browser.</p>
+      <div className="eb-table-wrap">
+        <table className="eb-table">
+          <thead>
+            <tr><th>#</th><th>PSA (ng/mL)</th><th>PI-RADS</th><th>Volume (mL)</th><th>Result</th><th aria-label="Remove" /></tr>
+          </thead>
+          <tbody>
+            {scored.map((r, i) => (
+              <tr key={r.id}>
+                <td className="eb-num">{i + 1}</td>
+                <td><input type="number" min="0.1" step="0.1" inputMode="decimal" placeholder="5.2" aria-label={`PSA ${i + 1}`} value={r.psa} onChange={(e) => edit(r.id, 'psa', e.target.value)} /></td>
+                <td>
+                  <select aria-label={`PI-RADS ${i + 1}`} value={r.pirads} onChange={(e) => edit(r.id, 'pirads', e.target.value)}>
+                    <option value="">—</option>
+                    {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </td>
+                <td><input type="number" min="1" step="1" inputMode="decimal" placeholder="optional" aria-label={`Volume ${i + 1}`} value={r.volume} onChange={(e) => edit(r.id, 'volume', e.target.value)} /></td>
+                <td className="eb-res" aria-live="polite">
+                  {r.result ? (
+                    <>
+                      <span className={`eb-pill tier-${r.result.tier.key}`}><strong>{r.result.percent.toFixed(1)}%</strong> {r.result.tier.label}</span>
+                      <span className="eb-muted">{r.result.psad != null && `PSAD ${r.result.psad.toFixed(3)} · `}{r.result.modelVersion}</span>
+                      {!r.result.reliable && <span className="eb-warn">PI-RADS 1–3: lower reliability</span>}
+                    </>
+                  ) : <span className="eb-muted">Enter PSA and PI-RADS</span>}
+                </td>
+                <td>
+                  <button className="eb-icon" disabled={rows.length === 1} aria-label={`Remove patient ${i + 1}`}
+                    onClick={() => setRows((rs) => rs.filter((x) => x.id !== r.id))}>×</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="eb-nav eb-nav-left">
+        <button className="eb-btn" onClick={() => setRows((rs) => [...rs, newRow()])}>+ Add patient</button>
+        <button className="eb-btn" onClick={exportCsv} disabled={!scored.some((r) => r.result)}>Export CSV</button>
+      </div>
+      <p className="eb-fine">ePSA biopsy model {scored.find((r) => r.result)?.result.modelVersion ?? 'v4'}: logistic regression on log(PSA), log(volume) and PI-RADS, N=126 Mount Sinai biopsies, OOF AUC 0.74 (95% CI 0.65–0.83). Decision threshold {BIOPSY_THRESHOLD}. Not externally validated.</p>
+    </section>
+  )
+}
+
+// ── App ──────────────────────────────────────────────────────
+const EMPTY = { psa: '', pirads: '', volume: '' }
+
+export default function App() {
+  const [view, setView] = useState('welcome')
+  const [values, setValues] = useState(EMPTY)
+  useEffect(() => { window.scrollTo(0, 0) }, [view])
+
+  return (
+    <div className="eb-app">
+      <Header view={view} setView={setView} />
+      <main className="eb-main">
+        {view === 'welcome' && <Welcome onStart={() => setView('form')} />}
+        {view === 'form' && <Questionnaire values={values} setValues={setValues} onBack={() => setView('welcome')} onDone={() => setView('result')} />}
+        {view === 'result' && <Result values={values} onRestart={() => { setValues(EMPTY); setView('welcome') }} />}
+        {view === 'clinician' && <Clinician />}
+      </main>
+      <footer className="eb-footer">
+        e-Biopsy supports shared decision-making between you and your clinician. It is not a diagnosis and does not replace medical advice.
+        <br />© Icahn School of Medicine at Mount Sinai · Department of Urology
+      </footer>
+    </div>
   )
 }
