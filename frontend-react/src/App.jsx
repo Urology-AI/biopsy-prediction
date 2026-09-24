@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { predictBiopsyRisk, BIOPSY_THRESHOLD, ENGINE_VERSION } from '@urology-ai/epsa-engine'
 import './App.css'
 
@@ -56,8 +56,8 @@ function Header({ view, setView }) {
           </span>
         </button>
         <nav className="eb-tabs" aria-label="Mode">
-          <button className={view !== 'clinician' ? 'active' : ''} onClick={() => setView('welcome')}>Patient</button>
-          <button className={view === 'clinician' ? 'active' : ''} onClick={() => setView('clinician')}>Clinician</button>
+          <button aria-pressed={view !== 'clinician'} className={view !== 'clinician' ? 'active' : ''} onClick={() => setView('welcome')}>Patient</button>
+          <button aria-pressed={view === 'clinician'} className={view === 'clinician' ? 'active' : ''} onClick={() => setView('clinician')}>Clinician</button>
         </nav>
       </div>
       <div className="eb-accent" />
@@ -90,6 +90,8 @@ function Welcome({ onStart }) {
 // ── Patient questionnaire ────────────────────────────────────
 function Questionnaire({ values, setValues, onDone, onBack }) {
   const [step, setStep] = useState(0)
+  const headingRef = useRef(null)
+  useEffect(() => { headingRef.current?.focus() }, [step])
   const set = (k) => (e) => setValues({ ...values, [k]: e.target.value })
   const psaOk = parseFloat(values.psa) > 0
   const volOk = values.volume === '' || parseFloat(values.volume) > 0
@@ -100,9 +102,9 @@ function Questionnaire({ values, setValues, onDone, onBack }) {
       help: 'This is on your blood test results, in ng/mL. For example: 5.4',
       ok: psaOk,
       field: (
-        <label className="eb-field">
+        <label className="eb-field" htmlFor="patient-psa">
           <span>PSA (ng/mL)</span>
-          <input type="number" inputMode="decimal" min="0.1" step="0.1" autoFocus value={values.psa} onChange={set('psa')} placeholder="e.g. 5.4" />
+          <input type="number" inputMode="decimal" min="0.1" step="0.1" id="patient-psa" aria-describedby="step-help" value={values.psa} onChange={set('psa')} placeholder="e.g. 5.4" />
         </label>
       ),
     },
@@ -111,15 +113,16 @@ function Questionnaire({ values, setValues, onDone, onBack }) {
       help: 'Your MRI report gives a PI-RADS score from 1 to 5. If there were several spots, use the highest one.',
       ok: !!values.pirads,
       field: (
-        <div className="eb-choices" role="radiogroup" aria-label="PI-RADS score">
+        <fieldset className="eb-choices" aria-describedby="step-help">
+          <legend className="eb-sr-only">PI-RADS score</legend>
           {PIRADS.map((o) => (
-            <button key={o.value} role="radio" aria-checked={String(values.pirads) === String(o.value)}
-              className={`eb-choice ${String(values.pirads) === String(o.value) ? 'selected' : ''}`}
-              onClick={() => setValues({ ...values, pirads: String(o.value) })}>
-              <strong>{o.label}</strong><span>{o.plain}</span>
-            </button>
+            <label key={o.value} className={`eb-choice ${String(values.pirads) === String(o.value) ? 'selected' : ''}`}>
+              <input type="radio" name="patient-pirads" value={o.value}
+                checked={String(values.pirads) === String(o.value)} onChange={set('pirads')} />
+              <span><strong>{o.label}</strong><span>{o.plain}</span></span>
+            </label>
           ))}
-        </div>
+        </fieldset>
       ),
     },
     {
@@ -127,9 +130,9 @@ function Questionnaire({ values, setValues, onDone, onBack }) {
       help: 'Usually listed on the MRI report as "prostate volume" or "gland volume", in mL or cc (they are the same). Leave blank if you don\'t know it.',
       ok: volOk,
       field: (
-        <label className="eb-field">
+        <label className="eb-field" htmlFor="patient-volume">
           <span>Prostate volume (mL) — optional</span>
-          <input type="number" inputMode="decimal" min="1" step="1" autoFocus value={values.volume} onChange={set('volume')} placeholder="e.g. 45" />
+          <input type="number" inputMode="decimal" min="1" step="1" id="patient-volume" aria-describedby="step-help" value={values.volume} onChange={set('volume')} placeholder="e.g. 45" />
         </label>
       ),
     },
@@ -142,8 +145,9 @@ function Questionnaire({ values, setValues, onDone, onBack }) {
       <div className="eb-progress" aria-label={`Step ${step + 1} of ${steps.length}`}>
         {steps.map((_, i) => <span key={i} className={i <= step ? 'on' : ''} />)}
       </div>
-      <h2>{s.title}</h2>
-      <p className="eb-help">{s.help}</p>
+      <p className="eb-eyebrow">Patient mode · Step {step + 1} of {steps.length}</p>
+      <h1 ref={headingRef} tabIndex={-1}>{s.title}</h1>
+      <p className="eb-help" id="step-help">{s.help}</p>
       {s.field}
       <div className="eb-nav">
         <button className="eb-btn" onClick={() => (step ? setStep(step - 1) : onBack())}>Back</button>
@@ -157,7 +161,6 @@ function Questionnaire({ values, setValues, onDone, onBack }) {
 
 // ── Patient result ───────────────────────────────────────────
 function Result({ values, onRestart }) {
-  const [detail, setDetail] = useState(false)
   const r = score(values)
   if (!r) return null
   const text = TIER_TEXT[r.tier.key]
@@ -166,21 +169,28 @@ function Result({ values, onRestart }) {
   return (
     <section className={`eb-card eb-result tier-${r.tier.key}`}>
       <p className="eb-eyebrow">Your e-Biopsy result</p>
-      <h2>{text.headline}</h2>
-      <div className="eb-meter" role="img" aria-label={`About ${outOf100} in 100`}>
+      <h1>Your estimated risk</h1>
+      <p className="eb-risk-value">{r.percent.toFixed(1)}<span>%</span></p>
+      <p className="eb-risk-label">Chance of Grade Group 2 or higher prostate cancer</p>
+      <span className="eb-pill">{r.tier.label}</span>
+      <p className="eb-threshold">
+        {r.percent >= BIOPSY_THRESHOLD * 100 ? 'At or above' : 'Below'} the model’s {(BIOPSY_THRESHOLD * 100).toFixed(0)}% biopsy decision threshold.
+        <span> This reference point helps guide a discussion; it does not decide whether you need a biopsy.</span>
+      </p>
+      <div className="eb-meter" aria-hidden="true">
         <div className="eb-meter-fill" style={{ width: `${Math.min(r.percent, 100)}%` }} />
         <div className="eb-meter-mark" style={{ left: `${BIOPSY_THRESHOLD * 100}%` }} title="Biopsy threshold" />
       </div>
+      <div className="eb-meter-scale" aria-hidden="true"><span>0%</span><span>Marker: {(BIOPSY_THRESHOLD * 100).toFixed(0)}% threshold</span><span>100%</span></div>
+      <h2>{text.headline}</h2>
       <p className="eb-big">About <strong>{outOf100} in 100</strong> men with results like yours have a prostate cancer that needs treatment (Grade Group 2 or higher).</p>
       <p>{text.body}</p>
       {!r.reliable && (
         <p className="eb-note">With a PI-RADS score of {values.pirads}, this estimate is less certain. Your urologist may also look at other tests.</p>
       )}
 
-      <button className="eb-link" onClick={() => setDetail(!detail)} aria-expanded={detail}>
-        {detail ? 'Hide clinical detail' : 'Show clinical detail (for your doctor)'}
-      </button>
-      {detail && (
+      <details className="eb-disclosure">
+        <summary>Clinical detail for your doctor</summary>
         <dl className="eb-detail">
           <dt>P(GG≥2)</dt><dd>{r.percent.toFixed(1)}%</dd>
           <dt>Tier</dt><dd>{r.tier.label}</dd>
@@ -189,7 +199,7 @@ function Result({ values, onRestart }) {
           {r.psad != null && (<><dt>PSA density</dt><dd>{r.psad.toFixed(3)} — {r.psadTier}</dd></>)}
           <dt>Model</dt><dd>{r.modelVersion} · threshold {BIOPSY_THRESHOLD} · engine {ENGINE_VERSION}</dd>
         </dl>
-      )}
+      </details>
 
       <div className="eb-nav">
         <button className="eb-btn" onClick={() => window.print()}>Print for my visit</button>
@@ -227,49 +237,73 @@ function Clinician() {
 
   return (
     <section className="eb-card eb-clin">
-      <h2>Clinician view</h2>
-      <p className="eb-help">GG≥2 risk for one or more patients. Results update as you type. Nothing is stored; the CSV is generated in your browser.</p>
-      <div className="eb-table-wrap">
-        <table className="eb-table">
-          <thead>
-            <tr><th>#</th><th>PSA (ng/mL)</th><th>PI-RADS</th><th>Volume (mL)</th><th>Result</th><th aria-label="Remove" /></tr>
-          </thead>
-          <tbody>
-            {scored.map((r, i) => (
-              <tr key={r.id}>
-                <td className="eb-num">{i + 1}</td>
-                <td><input type="number" min="0.1" step="0.1" inputMode="decimal" placeholder="5.2" aria-label={`PSA ${i + 1}`} value={r.psa} onChange={(e) => edit(r.id, 'psa', e.target.value)} /></td>
-                <td>
-                  <select aria-label={`PI-RADS ${i + 1}`} value={r.pirads} onChange={(e) => edit(r.id, 'pirads', e.target.value)}>
-                    <option value="">—</option>
+      <p className="eb-eyebrow">Clinician mode · GG≥2 risk assessment</p>
+      <h1>Biopsy risk workspace</h1>
+      <p className="eb-help">Results update as you type. Enter PSA and PI-RADS; prostate volume is optional. Nothing is stored; CSV files are generated in your browser.</p>
+      <div className="eb-patients">
+        {scored.map((r, i) => (
+          <article className="eb-patient" key={r.id} aria-labelledby={`patient-${r.id}`}>
+            <div className="eb-patient-heading">
+              <h2 id={`patient-${r.id}`}>Patient {i + 1}</h2>
+              <button className="eb-icon" disabled={rows.length === 1} aria-label={`Remove patient ${i + 1}`}
+                onClick={() => setRows((rs) => rs.filter((x) => x.id !== r.id))}>×</button>
+            </div>
+            <div className="eb-patient-layout">
+              <div className={`eb-clin-result tier-${r.result?.tier.key ?? 'pending'}`} role="status" aria-atomic="true">
+                <p className="eb-risk-label">Estimated P(GG≥2)</p>
+                {r.result ? (
+                  <>
+                    <p className="eb-risk-value">{r.result.percent.toFixed(1)}<span>%</span></p>
+                    <span className="eb-pill">{r.result.tier.label}</span>
+                    <p className="eb-threshold">{r.result.percent >= BIOPSY_THRESHOLD * 100 ? 'At or above' : 'Below'} {(BIOPSY_THRESHOLD * 100).toFixed(0)}% decision threshold</p>
+                    <span className="eb-muted">{r.result.psad != null && `PSAD ${r.result.psad.toFixed(3)} · `}{r.result.modelVersion}</span>
+                    {!r.result.reliable && <p className="eb-warn">PI-RADS 1–3: lower reliability</p>}
+                  </>
+                ) : <p className="eb-empty">Enter PSA and PI-RADS to see the risk estimate.</p>}
+              </div>
+              <fieldset className="eb-clin-fields">
+                <legend>Clinical inputs · Patient {i + 1}</legend>
+                <label className="eb-field" htmlFor={`psa-${r.id}`}>PSA (ng/mL)
+                  <input id={`psa-${r.id}`} type="number" min="0.1" step="0.1" inputMode="decimal" placeholder="e.g. 5.2" value={r.psa} onChange={(e) => edit(r.id, 'psa', e.target.value)} />
+                </label>
+                <label className="eb-field" htmlFor={`pirads-${r.id}`}>MRI PI-RADS
+                  <select id={`pirads-${r.id}`} value={r.pirads} onChange={(e) => edit(r.id, 'pirads', e.target.value)}>
+                    <option value="">Select score</option>
                     {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
                   </select>
-                </td>
-                <td><input type="number" min="1" step="1" inputMode="decimal" placeholder="optional" aria-label={`Volume ${i + 1}`} value={r.volume} onChange={(e) => edit(r.id, 'volume', e.target.value)} /></td>
-                <td className="eb-res" aria-live="polite">
-                  {r.result ? (
-                    <>
-                      <span className={`eb-pill tier-${r.result.tier.key}`}><strong>{r.result.percent.toFixed(1)}%</strong> {r.result.tier.label}</span>
-                      <span className="eb-muted">{r.result.psad != null && `PSAD ${r.result.psad.toFixed(3)} · `}{r.result.modelVersion}</span>
-                      {!r.result.reliable && <span className="eb-warn">PI-RADS 1–3: lower reliability</span>}
-                    </>
-                  ) : <span className="eb-muted">Enter PSA and PI-RADS</span>}
-                </td>
-                <td>
-                  <button className="eb-icon" disabled={rows.length === 1} aria-label={`Remove patient ${i + 1}`}
-                    onClick={() => setRows((rs) => rs.filter((x) => x.id !== r.id))}>×</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                </label>
+                <label className="eb-field" htmlFor={`volume-${r.id}`}>Prostate volume (mL) · optional
+                  <input id={`volume-${r.id}`} type="number" min="1" step="1" inputMode="decimal" placeholder="e.g. 45" value={r.volume} onChange={(e) => edit(r.id, 'volume', e.target.value)} />
+                </label>
+              </fieldset>
+            </div>
+          </article>
+        ))}
       </div>
       <div className="eb-nav eb-nav-left">
         <button className="eb-btn" onClick={() => setRows((rs) => [...rs, newRow()])}>+ Add patient</button>
         <button className="eb-btn" onClick={exportCsv} disabled={!scored.some((r) => r.result)}>Export CSV</button>
       </div>
+      <details className="eb-disclosure" open>
+        <summary>Model performance &amp; cohort</summary>
       <p className="eb-fine">ePSA biopsy model {scored.find((r) => r.result)?.result.modelVersion ?? 'v4'}: logistic regression on log(PSA), log(volume) and PI-RADS, N=126 Mount Sinai biopsies, OOF AUC 0.74 (95% CI 0.65–0.83). Decision threshold {BIOPSY_THRESHOLD}. Not externally validated.</p>
+      </details>
     </section>
+  )
+}
+
+function Limitations() {
+  return (
+    <aside className="eb-limitations" aria-label="Important model limitations">
+      <details className="eb-disclosure">
+        <summary>For clinical decision support only · Read model limitations</summary>
+        <div className="eb-disclosure-body">
+          <p>This estimate supports a conversation with your clinician. It is not a diagnosis and does not replace medical advice.</p>
+          <p>The model was developed using a training cohort of 126 Mount Sinai biopsies. Reported performance comes from that cohort, not independent validation. The model has not been externally validated.</p>
+          <p>Your clinician should interpret the result alongside your medical history, MRI findings, and other tests.</p>
+        </div>
+      </details>
+    </aside>
   )
 }
 
@@ -279,16 +313,22 @@ const EMPTY = { psa: '', pirads: '', volume: '' }
 export default function App() {
   const [view, setView] = useState('welcome')
   const [values, setValues] = useState(EMPTY)
-  useEffect(() => { window.scrollTo(0, 0) }, [view])
+  const mainRef = useRef(null)
+  useEffect(() => {
+    window.scrollTo(0, 0)
+    mainRef.current?.focus({ preventScroll: true })
+  }, [view])
 
   return (
-    <div className="eb-app">
+    <div className={`eb-app eb-mode-${view === 'clinician' ? 'clinician' : 'patient'}`}>
+      <a className="eb-skip" href="#main-content">Skip to content</a>
       <Header view={view} setView={setView} />
-      <main className="eb-main">
+      <main className="eb-main" id="main-content" ref={mainRef} tabIndex={-1}>
         {view === 'welcome' && <Welcome onStart={() => setView('form')} />}
         {view === 'form' && <Questionnaire values={values} setValues={setValues} onBack={() => setView('welcome')} onDone={() => setView('result')} />}
         {view === 'result' && <Result values={values} onRestart={() => { setValues(EMPTY); setView('welcome') }} />}
         {view === 'clinician' && <Clinician />}
+        <Limitations />
       </main>
       <footer className="eb-footer">
         e-Biopsy supports shared decision-making between you and your clinician. It is not a diagnosis and does not replace medical advice.
